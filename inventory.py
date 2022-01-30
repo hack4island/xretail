@@ -42,7 +42,7 @@ import itertools
 from itertools import chain
 import cv2
 from sklearn.cluster import KMeans
-
+import traceback
 
 
 def grayscale(image):
@@ -94,45 +94,10 @@ def match_template(image, template):
     return cv2.matchTemplate(image, template, cv2.TM_CCOEFF_NORMED)
 
 
-model_pad = torch.hub.load('ultralytics/yolov5', 'custom', path='pad.pt')
+model_pad = torch.hub.load('ultralytics/yolov5', 'custom', path='pad_ean_fields.pt')
 model_ean = torch.hub.load('ultralytics/yolov5', 'custom', path='ean.pt')
 #model_digit_box = torch.hub.load('ultralytics/yolov5', 'custom', path='digit_box_ean.pt')
 #model_digit_recognition = tf.keras.models.load_model('digital_ia_3.h5')
-
-
-def bloc_retrieval_pytesseract():
-            im1_cv = np.array(im1)
-
-            im1_cv_rgb = cv2.cvtColor(im1_cv, cv2.COLOR_BGR2RGB)
-            results = pytesseract.image_to_data(im1_cv_rgb , output_type=Output.DICT)
-            # loop over each of the individual text localizations
-            for i in range(0, len(results["text"])):
-            	# extract the bounding box coordinates of the text region from
-            	# the current result
-            	x = results["left"][i]
-            	y = results["top"][i]
-            	w = results["width"][i]
-            	h = results["height"][i]
-            	# extract the OCR text itself along with the confidence of the
-            	# text localization
-            	text = results["text"][i]
-            	conf = int(results["conf"][i])
-
-            	if conf > 0.4:
-            		# display the confidence and text to our terminal
-            		print("Confidence: {}".format(conf))
-            		print("Text: {}".format(text))
-            		print("")
-            		# strip out non-ASCII text so we can draw the text on the image
-            		# using OpenCV, then draw a bounding box around the text along
-            		# with the text itself
-            		text = "".join([c if ord(c) < 128 else "" for c in text]).strip()
-            		cv2.rectangle(im1_cv_rgb, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            		cv2.putText(im1_cv_rgb, text, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX,
-            			1.2, (0, 0, 255), 3)
-            # show the output image
-            #cv2.imwrite("{}_test_pytesseract_loc.jpeg".format(str(time.time())), im1_cv_rgb)
-
 
 
 def encode_single_sample(img, label):
@@ -167,16 +132,6 @@ def enlarge_s(dim, percent):
     return tuple(filt_dim)
 
 
-custom_config = r'--oem 1 --psm 7 -c tessedit_char_whitelist=0123456789'
-from pytesseract import Output
-
-
-
-def box_list(box_lst):
-    "add center for each box"
-    pass
-
-
 
 def get_center(box):
     x = box[0] + (box[2] - box[0])/2
@@ -197,109 +152,128 @@ color = (0, 0, 255)
 # Line thickness of 2 px
 thickness = 3
 
+def enlarge(dim, percent):
+    filt_dim = dim[:-2]
+    w = filt_dim[2] - filt_dim[0]
+    y = filt_dim[3] - filt_dim[1]
+    filt_dim[0] = filt_dim[0] - w*percent
+    filt_dim[1] = filt_dim[1] - y*percent
+    filt_dim[2] = filt_dim[2] + w*percent
+    filt_dim[3] = filt_dim[3] + y*percent
+    return filt_dim
+
+
+import re
+from PIL import ImageFont, ImageDraw, Image
+
+custom_config = r'--oem 1 --psm 7 -c tessedit_char_whitelist=0123456789'
+from pytesseract import Output
+
+font = ImageFont.truetype(font="raleway.ttf", size=200, index=0, encoding='', layout_engine=None)
+
+
+def get_price(image_pillow=None, model=None):
+            """extract EAN field"""
+            box_lst = []
+            center_lst = []
+            digit_lst = []
+
+
+
+            output_ean = model_ean(image_pillow)
+
+            for pre in output_ean.pred[0]:
+
+                dim1 = pre.tolist()
+
+                if dim1[-1] == 8.0:
+                    dim1[-1] = 7.0
+
+                elif dim1[-1] == 9.0:
+                    dim1[-1] = 8.0
+
+                elif dim1[-1] == 10:
+                        dim1[-1] = 9.0
+
+
+                if dim1[-2]>0.5:
+                    if (dim1[-1] != 11.0):
+                        box_coord = [dim1[0], dim1[1], dim1[2], dim1[3]]
+                        digit_lst.append([dim1[0], dim1[1], dim1[2], dim1[3], dim1[-1]])
+                        box_lst.append(box_coord)
+                        center_lst.append(get_center(box_coord))
+
+            X = np.array(center_lst)
+            kmeans = KMeans(n_clusters=2)
+            kmeans.fit(X)
+            y_kmeans = kmeans.predict(X)
+            mydict = {i: np.where(kmeans.labels_ == i)[0] for i in range(kmeans.n_clusters)}
+
+            if kmeans.cluster_centers_[1][0] > kmeans.cluster_centers_[0][0]:
+                lst = mydict[1]
+            else:
+                lst = mydict[0]
+
+            tmp_lst = []
+            for ind in lst:
+                tmp_lst.append(digit_lst[ind])
+            tmp_lst = sorted(tmp_lst)
+            price = [str(int(item[-1])) for item in tmp_lst]
+            price = "".join(price[:-2]) + "." + price[-2] + price[-1]
+            return price
+
+
 
 def analyze(image_retail):
 
     fig = plt.figure()
     ax = plt.axes()
 
-    img_ray = Image.open(image_retail)
+    zoomed_im = Image.open(image_retail)
+    img1 = ImageDraw.Draw(zoomed_im)
 
     """extract pad"""
-    output = model_pad(img_ray)
+    output_pad = model_pad(zoomed_im)
 
-    im_fin = np.array(img_ray)
 
+
+    dim_lst = []
     """loop on price pads"""
-    for pred in output.pred[0]:
-        box_lst = []
-        center_lst = []
-        digit_lst = []
-
+    for pred in output_pad.pred[0]:
         dim = pred.tolist()
-        im1 = img_ray.crop(enlarge(dim, 0.2))
+        if dim[-1] == 0 and dim[-2]>0.30 :
+            dim_lst.append(dim)
+
+    ord_list = sorted(dim_lst, key = lambda x: x[-2])
+
+    dim = ord_list[-1]
+
+    im2 = zoomed_im.crop(enlarge(dim, 0.0075))
+    im2_arr = np.array(im2)
+    im2_arr = cv2.cvtColor(im2_arr, cv2.COLOR_BGR2RGB)
+    res = pytesseract.image_to_string(im2_arr, config=custom_config)
+
+    """draw"""
+    dim = enlarge(dim, 0.1)
+    img1.rectangle(((dim[0], dim[1]), (dim[2], dim[3])), outline ="red", width=5)
+    res = re.sub("[^0-9]", "", res)
+    print(res)
+    img1.text((dim[0], dim[3]), "EAN :" + res, fill=(255,0,0,255), font=font)
+
+    try:
+        price = get_price(image_pillow=zoomed_im, model=model_ean)
+        img1.text((dim[0], dim[3]+150), price + " " + "EUROS", fill=(0,255,0,255), font=font)
+
+    except:
+        traceback.print_exc()
 
 
-        """extract EAN field"""
-        output_ean = model_ean(im1)
-
-        draw1 = ImageDraw.Draw(im1)
-
-        for pre in output_ean.pred[0]:
-            dim1 = pre.tolist()
-
-            if dim1[-1] == 8.0:
-                dim1[-1] = 7.0
-
-            elif dim1[-1] == 9.0:
-                dim1[-1] = 8.0
-
-            elif dim1[-1] == 10:
-                    dim1[-1] = 9.0
-
-
-            if dim1[-2]>0.7:
-
-                """select ration and pad"""
-                if (float(dim1[0]-dim1[2] / dim1[1]/dim1[3]) > 10) and (dim1[-1] == 11.0):
-
-                     im2 = im1.crop(enlarge(dim1, 0.1))
-                     draw1.rectangle(enlarge(dim1, 0.10), outline=(random.randint(0, 255), 0, 0), width=2)
-                     im2_arr = np.array(im2)
-
-                     """extract digit boxes"""
-                     img_rgb = cv2.cvtColor(im2_arr, cv2.COLOR_BGR2RGB)
-                     im2_arr = img_rgb
-                     res = pytesseract.image_to_string(im2_arr, config=custom_config)
-                     #cv2.imwrite("./results/"+res+"_ocr_pytess.jpeg", im2_arr)
-
-                elif (dim1[-1] != 11.0):
-                    box_coord = [dim1[0], dim1[1], dim1[2], dim1[3]]
-                    digit_lst.append([dim1[0], dim1[1], dim1[2], dim1[3], dim1[-1]])
-                    box_lst.append(box_coord)
-                    center_lst.append(get_center(box_coord))
-
-        X = np.array(center_lst)
-        kmeans = KMeans(n_clusters=2)
-        kmeans.fit(X)
-        y_kmeans = kmeans.predict(X)
-
-        mydict = {i: np.where(kmeans.labels_ == i)[0] for i in range(kmeans.n_clusters)}
-
-        if kmeans.cluster_centers_[1][0] > kmeans.cluster_centers_[0][0]:
-            lst = mydict[1]
-        else:
-            lst = mydict[0]
-
-
-        tmp_lst = []
-
-        for ind in lst:
-            tmp_lst.append(digit_lst[ind])
-
-        tmp_lst = sorted(tmp_lst)
-        price = [str(int(item[-1])) for item in tmp_lst]
-        price = "".join(price[:-2]) + "." + price[-2] + price[-1]
-
-        org = (int(dim[0]), int(dim[3]))
-        org_bottom = (int(dim[0]), int(dim[3])+70)
-
-        try:
-            res = re.sub("[^0-9]", "", res)
-            print(res)
-            print(price)
-            im_fin = cv2.putText(img = im_fin, text=res, org =org, fontFace =font, fontScale = fontScale, color =color, thickness =thickness)
-            im_fin = cv2.putText(img = im_fin, text=price , org =org_bottom, fontFace =font, fontScale = fontScale, color =color, thickness =thickness)
-
-        except:
-            print("error")
-
-    cv2.imwrite("./displ_res/im1_ocr_pytess{}.jpeg".format(str(time.time())), im_fin)
+    zoomed_im.save("./results_3/zoom{}.jpeg".format(str(time.time())))
     plt.close('all')
 
-lstf = glob.glob("./store/*")
+lstf = glob.glob("./pads_2/*")
 for fl in lstf:
     try:
         analyze(fl)
     except Exception as e:
-        print(e)
+        traceback.print_exc()
