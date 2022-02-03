@@ -1,4 +1,4 @@
 # xretail
 
 
-An universal mobile application for store and retail inventory.
+An universal mobile machine learning application for store and retail inventory.
